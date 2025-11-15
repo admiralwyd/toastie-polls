@@ -33,18 +33,18 @@
         // PASTE YOUR FIREBASE CONFIG OBJECT HERE
         // You get this from your Firebase project's "Project settings" > "Web App"
         const firebaseConfig = {
-                apiKey: "AIzaSyCbS02vsJOPnSkrxi9pkbf6hkih5jQCKPo",
-                authDomain: "my-toastmasters-election.firebaseapp.com",
-                projectId: "my-toastmasters-election",
-                storageBucket: "my-toastmasters-election.firebasestorage.app",
-                messagingSenderId: "86113740226",
-                appId: "1:86113740226:web:1e3a9dca1548a52344a25b"
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
         };
         // --- END OF CONFIG ---
 
         // This password provides simple protection for the Admin panel.
         // Change 'toastmasters' to your own secret password.
-        const ADMIN_PASSWORD = 'toastmasterseec26$';
+        const ADMIN_PASSWORD = 'toastmasters';
 
         // --- App State ---
         let db, auth;
@@ -206,6 +206,7 @@
                     db = getFirestore(app);
                     auth = getAuth(app);
                 } else {
+                    showError("Firebase config is not set. Please edit this file."); // More helpful error
                     throw new Error("Firebase config is not set. Please edit the file.");
                 }
 
@@ -236,17 +237,19 @@
          */
         function setupListeners() {
             if (!db || !userId) return;
-
-            // Detach previous listeners if they exist
-            if (electionConfigUnsubscribe) electionConfigUnsubscribe();
-            if (voterStatusUnsubscribe) voterStatusUnsubscribe();
-
+<!-- ... existing code ...
             try {
                 // 1. Listen to election configuration
                 const configRef = doc(db, CONFIG_DOC_PATH);
                 electionConfigUnsubscribe = onSnapshot(configRef, (docSnap) => {
                     if (docSnap.exists()) {
                         electionConfig = docSnap.data();
+                        // --- FIX ---
+                        // Ensure the positions array always exists, even if the DB doc is new
+                        if (!electionConfig.positions) {
+                            electionConfig.positions = [];
+                        }
+                        // --- END FIX ---
                     } else {
                         // No config found, default to closed
                         electionConfig = { isOpen: false, positions: [] };
@@ -303,7 +306,10 @@
             if (!container) return;
             container.innerHTML = ''; // Clear existing
             
-            electionConfig.positions.forEach((position, posIndex) => {
+            // Ensure positions is an array before mapping (extra safeguard)
+            const positions = electionConfig.positions || [];
+
+            positions.forEach((position, posIndex) => {
                 const posEl = document.createElement('div');
                 posEl.className = 'p-4 border border-gray-300 rounded-lg bg-gray-50 mb-4';
                 
@@ -404,6 +410,10 @@
          * Handles the "Add Position" button click.
          */
         function handleAddPosition() {
+            // Ensure positions exists before pushing (extra safeguard)
+            if (!electionConfig.positions) {
+                electionConfig.positions = [];
+            }
             electionConfig.positions.push({ name: '', candidates: [{ name: '', votes: 0 }] });
             renderAdminView();
         }
@@ -887,7 +897,4 @@
     </div>
 
 </body>
-
 </html>
-
-
