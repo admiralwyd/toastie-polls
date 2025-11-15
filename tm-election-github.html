@@ -1,0 +1,912 @@
+<!-- MIT License
+
+Copyright (c) 2025 Vishnu Vedant Devanand
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Toastmasters Club Elections</title>
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 2. Inter Font -->
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+    <!-- 3. Firebase SDK -->
+    <script type="module">
+        // Firebase imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            onSnapshot, 
+            setDoc,
+            runTransaction,
+            collection,
+            writeBatch,
+            getDocs,
+            Timestamp
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Configuration ---
+        // PASTE YOUR FIREBASE CONFIG OBJECT HERE
+        // You get this from your Firebase project's "Project settings" > "Web App"
+        const firebaseConfig = {
+                apiKey: "AIzaSyCbS02vsJOPnSkrxi9pkbf6hkih5jQCKPo",
+                authDomain: "my-toastmasters-election.firebaseapp.com",
+                projectId: "my-toastmasters-election",
+                storageBucket: "my-toastmasters-election.firebasestorage.app",
+                messagingSenderId: "86113740226",
+                appId: "1:86113740226:web:1e3a9dca1548a52344a25b"
+        };
+        // --- END OF CONFIG ---
+
+        // This password provides simple protection for the Admin panel.
+        // Change 'toastmasters' to your own secret password.
+        const ADMIN_PASSWORD = 'toastmasters';
+
+        // --- App State ---
+        let db, auth;
+        let userId = null;
+        let currentView = 'loading'; // loading, vote, results, admin
+        let electionConfigUnsubscribe = null;
+        let voterStatusUnsubscribe = null;
+        let electionConfig = { isOpen: false, positions: [] };
+        let voterStatus = { hasVoted: false };
+
+        // --- DOM Elements ---
+        const loadingView = () => document.getElementById('loading-view');
+        const appView = () => document.getElementById('app-view');
+        const viewTabs = () => document.getElementById('view-tabs');
+        const voteView = () => document.getElementById('vote-view');
+        const resultsView = () => document.getElementById('results-view');
+        const adminView = () => document.getElementById('admin-view');
+        const userIdDisplay = () => document.getElementById('user-id-display');
+        const errorDisplay = () => document.getElementById('error-display');
+        
+        // Admin View Elements
+        const electionStatusToggle = () => document.getElementById('election-status-toggle');
+        const electionStatusText = () => document.getElementById('election-status-text');
+        const positionsContainer = () => document.getElementById('positions-container');
+        const addPositionButton = () => document.getElementById('add-position');
+        const saveConfigButton = () => document.getElementById('save-config');
+        const resetElectionButton = () => document.getElementById('reset-election');
+
+        // Vote View Elements
+        const ballotForm = () => document.getElementById('ballot-form');
+        const voteMessage = () => document.getElementById('vote-message');
+        const submitVoteButton = () => document.getElementById('submit-vote');
+
+        // Results View Elements
+        const resultsContainer = () => document.getElementById('results-container');
+        const resultsMessage = () => document.getElementById('results-message');
+
+        // --- Firestore Paths ---
+        // Simplified paths for a dedicated project
+        const ELECTION_DOC_ID = 'live'; // Use 'live' for the main election, could be 'test'
+        const ELECTION_BASE_PATH = 'elections/main';
+        const CONFIG_DOC_PATH = `${ELECTION_BASE_PATH}/config/${ELECTION_DOC_ID}`;
+        const VOTERS_COLLECTION_PATH = `${ELECTION_BASE_PATH}/voters`;
+        const voterDocPath = (uid) => `${VOTERS_COLLECTION_PATH}/${uid}`;
+
+        // --- Utility Functions ---
+
+        /**
+         * Displays an error message to the user.
+         * @param {string} message The error message to show.
+         */
+        function showError(message) {
+            console.error(message);
+            const errorEl = errorDisplay();
+            if (errorEl) {
+                errorEl.textContent = `Error: ${message}`;
+                errorEl.classList.remove('hidden');
+            }
+        }
+
+        /**
+         * Clears the error message.
+         */
+        function clearError() {
+            const errorEl = errorDisplay();
+            if (errorEl && !errorEl.classList.contains('hidden')) {
+                errorEl.textContent = '';
+                errorEl.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Custom modal for alerts.
+         * @param {string} message The message to display.
+         */
+        function customAlert(message) {
+            // Using a simple browser alert for this standalone file.
+            // In a real app, you'd build a custom HTML modal.
+            alert(message);
+        }
+
+        /**
+         * Custom modal for confirmations.
+         * @param {string} message The confirmation question.
+         * @returns {boolean} True if user confirmed, false otherwise.
+         */
+        function customConfirm(message) {
+            // Using a simple browser confirm for this standalone file.
+            return confirm(message);
+        }
+
+        /**
+         * Custom modal for prompts.
+         * @param {string} message The prompt message.
+         * @returns {string | null} The user's input or null if cancelled.
+         */
+        function customPrompt(message) {
+             // Using a simple browser prompt for this standalone file.
+            return prompt(message);
+        }
+
+        /**
+         * Switches the main view of the application.
+         * @param {string} viewName - The view to switch to ('loading', 'vote', 'results', 'admin').
+         */
+        function switchView(viewName) {
+            clearError();
+
+            // --- Admin Panel Password Check ---
+            if (viewName === 'admin') {
+                const password = customPrompt('Enter Admin Password:');
+                if (password !== ADMIN_PASSWORD) {
+                    showError('Incorrect password.');
+                    // Don't switch the view, just return
+                    return;
+                }
+            }
+            // --- End of Password Check ---
+
+            currentView = viewName;
+            
+            // Hide all main views
+            loadingView()?.classList.add('hidden');
+            appView()?.classList.add('hidden');
+            
+            // Hide all app sub-views
+            voteView()?.classList.add('hidden');
+            resultsView()?.classList.add('hidden');
+            adminView()?.classList.add('hidden');
+
+            // De-activate all tabs
+            document.querySelectorAll('#view-tabs button').forEach(btn => {
+                btn.classList.replace('bg-indigo-600', 'bg-indigo-500');
+                btn.classList.replace('text-white', 'text-indigo-100');
+            });
+
+            if (viewName === 'loading') {
+                loadingView()?.classList.remove('hidden');
+            } else {
+                appView()?.classList.remove('hidden');
+                const viewToShow = document.getElementById(`${viewName}-view`);
+                viewToShow?.classList.remove('hidden');
+
+                const tabButton = document.getElementById(`tab-${viewName}`);
+                tabButton?.classList.replace('bg-indigo-500', 'bg-indigo-600');
+                tabButton?.classList.replace('text-indigo-100', 'text-white');
+            }
+        }
+
+        // --- Firebase Initialization ---
+
+        /**
+         * Initializes Firebase and handles user authentication.
+         */
+        async function initializeFirebase() {
+            try {
+                if (!firebaseConfig.apiKey.includes("YOUR_")) {
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                } else {
+                    throw new Error("Firebase config is not set. Please edit the file.");
+                }
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        // User is signed in.
+                        userId = user.uid;
+                        userIdDisplay().textContent = `Your Anonymous ID: ${userId}`;
+                        setupListeners(); // Start listening to data
+                        switchView('vote'); // Default view
+                        viewTabs().classList.remove('hidden');
+                    } else {
+                        // User is signed out. Sign in anonymously.
+                        userId = null;
+                        await signInAnonymously(auth);
+                    }
+                });
+
+            } catch (error) {
+                showError(`Firebase init failed: ${error.message}`);
+                switchView('loading');
+                console.error("Firebase initialization error:", error);
+            }
+        }
+
+        /**
+         * Sets up real-time listeners for election data.
+         */
+        function setupListeners() {
+            if (!db || !userId) return;
+
+            // Detach previous listeners if they exist
+            if (electionConfigUnsubscribe) electionConfigUnsubscribe();
+            if (voterStatusUnsubscribe) voterStatusUnsubscribe();
+
+            try {
+                // 1. Listen to election configuration
+                const configRef = doc(db, CONFIG_DOC_PATH);
+                electionConfigUnsubscribe = onSnapshot(configRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        electionConfig = docSnap.data();
+                    } else {
+                        // No config found, default to closed
+                        electionConfig = { isOpen: false, positions: [] };
+                    }
+                    // Re-render all views that depend on this data
+                    renderAdminView();
+                    renderVoteView();
+                    renderResultsView();
+                }, (error) => {
+                    showError(`Failed to load election config: ${error.message}`);
+                    console.error("Config snapshot error: ", error);
+                });
+
+                // 2. Listen to this user's voter status
+                const voterRef = doc(db, voterDocPath(userId));
+                voterStatusUnsubscribe = onSnapshot(voterRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        voterStatus = docSnap.data();
+                    } else {
+                        voterStatus = { hasVoted: false };
+                    }
+                    // Re-render vote view, as it depends on this
+                    renderVoteView();
+                }, (error) => {
+                    showError(`Failed to load voter status: ${error.message}`);
+                    console.error("Voter status snapshot error: ", error);
+                });
+
+            } catch (error) {
+                showError(`Listener setup failed: ${error.message}`);
+                console.error("Listener setup error:", error);
+            }
+        }
+
+        // --- Admin View Logic ---
+
+        /**
+         * Renders the Admin view based on the current electionConfig.
+         */
+        function renderAdminView() {
+            if (!electionConfig) return;
+
+            // Update status toggle
+            const toggle = electionStatusToggle();
+            const statusText = electionStatusText();
+            if (toggle && statusText) {
+                toggle.checked = electionConfig.isOpen;
+                statusText.textContent = electionConfig.isOpen ? 'Election is OPEN' : 'Election is CLOSED';
+                statusText.className = electionConfig.isOpen ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold';
+            }
+            
+            // Render positions and candidates
+            const container = positionsContainer();
+            if (!container) return;
+            container.innerHTML = ''; // Clear existing
+            
+            electionConfig.positions.forEach((position, posIndex) => {
+                const posEl = document.createElement('div');
+                posEl.className = 'p-4 border border-gray-300 rounded-lg bg-gray-50 mb-4';
+                
+                let candidatesHTML = position.candidates.map((candidate, candIndex) => `
+                    <div class="flex items-center space-x-2 mt-2">
+                        <input 
+                            type="text" 
+                            value="${candidate.name}" 
+                            data-pos-index="${posIndex}" 
+                            data-cand-index="${candIndex}"
+                            class="candidate-name-input flex-1 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                            placeholder="Candidate Name"
+                        >
+                        <button 
+                            type="button" 
+                            class="remove-candidate-btn text-red-500 hover:text-red-700 font-medium"
+                            data-pos-index="${posIndex}" 
+                            data-cand-index="${candIndex}"
+                        >Remove</button>
+                    </div>
+                `).join('');
+
+                posEl.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <input 
+                            type="text" 
+                            value="${position.name}" 
+                            data-pos-index="${posIndex}"
+                            class="position-name-input text-lg font-semibold w-full border-b-2 border-gray-300 focus:border-indigo-500 outline-none"
+                            placeholder="Position Name"
+                        >
+                        <button 
+                            type="button" 
+                            class="remove-position-btn text-red-600 hover:text-red-800 font-bold ml-4"
+                            data-pos-index="${posIndex}"
+                        >X</button>
+                    </div>
+                    <div class="mt-2">
+                        <label class="block text-sm font-medium text-gray-700">Candidates:</label>
+                        ${candidatesHTML}
+                        <button 
+                            type="button" 
+                            class="add-candidate-btn mt-3 px-3 py-1 text-sm bg-green-500 hover:bg-green-600 text-white rounded-md shadow-sm"
+                            data-pos-index="${posIndex}"
+                        >+ Add Candidate</button>
+                    </div>
+                `;
+                container.appendChild(posEl);
+            });
+
+            // Add event listeners for new elements
+            attachAdminInputListeners();
+        }
+
+        /**
+         * Attaches event listeners to the dynamic admin form elements.
+         */
+        function attachAdminInputListeners() {
+            // Update local state from inputs
+            document.querySelectorAll('.position-name-input').forEach(input => {
+                input.oninput = (e) => {
+                    electionConfig.positions[e.target.dataset.posIndex].name = e.target.value;
+                };
+            });
+            document.querySelectorAll('.candidate-name-input').forEach(input => {
+                input.oninput = (e) => {
+                    const { posIndex, candIndex } = e.target.dataset;
+                    electionConfig.positions[posIndex].candidates[candIndex].name = e.target.value;
+                };
+            });
+
+            // Remove buttons
+            document.querySelectorAll('.remove-position-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    electionConfig.positions.splice(e.currentTarget.dataset.posIndex, 1);
+                    renderAdminView(); // Re-render to update UI and indices
+                };
+            });
+            document.querySelectorAll('.remove-candidate-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    const { posIndex, candIndex } = e.currentTarget.dataset;
+                    electionConfig.positions[posIndex].candidates.splice(candIndex, 1);
+                    renderAdminView(); // Re-render
+                };
+            });
+
+            // Add buttons
+            document.querySelectorAll('.add-candidate-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    const { posIndex } = e.currentTarget.dataset;
+                    electionConfig.positions[posIndex].candidates.push({ name: '', votes: 0 });
+                    renderAdminView(); // Re-render
+                };
+            });
+        }
+
+        /**
+         * Handles the "Add Position" button click.
+         */
+        function handleAddPosition() {
+            electionConfig.positions.push({ name: '', candidates: [{ name: '', votes: 0 }] });
+            renderAdminView();
+        }
+
+        /**
+         * Toggles the election's open/closed state.
+         */
+        async function handleToggleElectionStatus(e) {
+            const newStatus = e.target.checked;
+            const configRef = doc(db, CONFIG_DOC_PATH);
+            try {
+                await setDoc(configRef, { isOpen: newStatus }, { merge: true });
+                // Listener will pick up the change and re-render
+            } catch (error) {
+                showError(`Could not toggle election status: ${error.message}`);
+                console.error("Toggle election error: ", error);
+                // Revert toggle
+                e.target.checked = !newStatus;
+            }
+        }
+
+        /**
+         * Saves the current form state to Firestore.
+         */
+        async function handleSaveConfig() {
+            const saveBtn = saveConfigButton();
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            
+            const configRef = doc(db, CONFIG_DOC_PATH);
+            try {
+                // Ensure all candidates have a 'votes' property
+                const cleanConfig = {
+                    ...electionConfig,
+                    positions: electionConfig.positions.map(pos => ({
+                        ...pos,
+                        candidates: pos.candidates.map(cand => ({
+                            name: cand.name || 'Unnamed Candidate',
+                            votes: cand.votes || 0 // Ensure votes exist
+                        }))
+                    }))
+                };
+                
+                await setDoc(configRef, cleanConfig, { merge: true });
+                customAlert('Configuration saved!');
+            } catch (error) {
+                showError(`Failed to save config: ${error.message}`);
+                console.error("Save config error: ", error);
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Configuration';
+            }
+        }
+
+        /**
+         * Resets the election: clears all votes and sets all voters to 'hasVoted: false'.
+         */
+        async function handleResetElection() {
+            if (!customConfirm('Are you sure you want to reset the election? This will clear ALL votes and ALL voter statuses. This cannot be undone.')) {
+                return;
+            }
+            
+            const resetBtn = resetElectionButton();
+            resetBtn.disabled = true;
+            resetBtn.textContent = 'Resetting...';
+
+            try {
+                // 1. Reset vote counts in config
+                const configRef = doc(db, CONFIG_DOC_PATH);
+                const newPositions = electionConfig.positions.map(pos => ({
+                    ...pos,
+                    candidates: pos.candidates.map(cand => ({
+                        ...cand,
+                        votes: 0
+                    }))
+                }));
+                
+                await setDoc(configRef, { 
+                    isOpen: false, // Also close the election
+                    positions: newPositions
+                }, { merge: true });
+
+                // 2. Delete all documents in the 'voters' collection
+                const votersRef = collection(db, VOTERS_COLLECTION_PATH);
+                const votersSnapshot = await getDocs(votersRef);
+                
+                const batch = writeBatch(db);
+                votersSnapshot.docs.forEach(doc => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+
+                customAlert('Election has been reset. All votes and voter statuses are cleared.');
+
+            } catch (error) {
+                showError(`Failed to reset election: ${error.message}`);
+                console.error("Reset election error: ", error);
+            } finally {
+                resetBtn.disabled = false;
+                resetBtn.textContent = 'Reset Entire Election';
+            }
+        }
+
+
+        // --- Vote View Logic ---
+
+        /**
+         * Renders the voting ballot based on config and voter status.
+         */
+        function renderVoteView() {
+            const form = ballotForm();
+            const message = voteMessage();
+            const submitBtn = submitVoteButton();
+
+            if (!form || !message || !submitBtn) return;
+
+            // Clear previous state
+            form.innerHTML = '';
+            message.innerHTML = '';
+            message.className = 'text-center p-4 rounded-md';
+            submitBtn.classList.add('hidden');
+
+            if (voterStatus.hasVoted) {
+                message.innerHTML = '<h3 class="text-lg font-semibold text-green-800">Thank you for voting!</h3><p class="text-gray-700">Your vote has been recorded.</p>';
+                message.classList.add('bg-green-100', 'border', 'border-green-200');
+            } else if (!electionConfig.isOpen) {
+                message.innerHTML = '<h3 class="text-lg font-semibold text-yellow-800">The election is currently closed.</h3><p class="text-gray-700">Please check back later.</p>';
+                message.classList.add('bg-yellow-100', 'border', 'border-yellow-200');
+            } else if (!electionConfig.positions || electionConfig.positions.length === 0) {
+                message.innerHTML = '<h3 class="text-lg font-semibold text-gray-800">No positions.</h3><p class="text-gray-700">The election has not been configured yet.</p>';
+                message.classList.add('bg-gray-100', 'border', 'border-gray-200');
+            } else {
+                // Election is open and user hasn't voted. Render the ballot.
+                message.classList.add('hidden');
+                submitBtn.classList.remove('hidden');
+
+                electionConfig.positions.forEach((position, posIndex) => {
+                    const fieldset = document.createElement('fieldset');
+                    fieldset.className = 'mb-6 p-4 border border-gray-200 rounded-lg bg-white shadow-sm';
+                    
+                    let candidatesHTML = position.candidates.map((candidate, candIndex) => `
+                        <label for="pos-${posIndex}-cand-${candIndex}" class="flex items-center space-x-3 p-3 rounded-md hover:bg-gray-50 transition-colors">
+                            <input 
+                                type="radio" 
+                                id="pos-${posIndex}-cand-${candIndex}" 
+                                name="position-${posIndex}" 
+                                value="${candIndex}"
+                                class="h-5 w-5 text-indigo-600 focus:ring-indigo-500 border-gray-300"
+                                required
+                            >
+                            <span class="text-lg text-gray-800">${candidate.name}</span>
+                        </label>
+                    `).join('');
+
+                    fieldset.innerHTML = `
+                        <legend class="text-xl font-semibold text-gray-900 mb-3">${position.name}</legend>
+                        <div class="space-y-2">
+                            ${candidatesHTML}
+                            <label for="pos-${posIndex}-abstain" class="flex items-center space-x-3 p-3 rounded-md hover:bg-gray-50 transition-colors">
+                                <input 
+                                    type="radio" 
+                                    id="pos-${posIndex}-abstain" 
+                                    name="position-${posIndex}" 
+                                    value="abstain"
+                                    class="h-5 w-5 text-indigo-600 focus:ring-indigo-500 border-gray-300"
+                                    required
+                                >
+                                <span class="text-lg text-gray-800 italic">Abstain</span>
+                            </label>
+                        </div>
+                    `;
+                    form.appendChild(fieldset);
+                });
+            }
+        }
+
+        /**
+         * Handles the submission of the ballot.
+         */
+        async function handleSubmitVote(e) {
+            e.preventDefault();
+            
+            if (!customConfirm('Are you sure you want to submit your vote? You cannot change it later.')) {
+                return;
+            }
+
+            const submitBtn = submitVoteButton();
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submitting...';
+            clearError();
+
+            const formData = new FormData(e.target);
+            const votes = [];
+            
+            // Collate votes from form
+            for (let i = 0; i < electionConfig.positions.length; i++) {
+                const candIndex = formData.get(`position-${i}`);
+                if (candIndex !== 'abstain' && candIndex !== null) {
+                    votes.push({
+                        posIndex: i,
+                        candIndex: parseInt(candIndex)
+                    });
+                }
+            }
+            
+            // --- Atomic Transaction ---
+            // This is the core of the secure voting.
+            // It runs as a single operation. If any part fails, the whole thing
+            // is rolled back.
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const configRef = doc(db, CONFIG_DOC_PATH);
+                    const voterRef = doc(db, voterDocPath(userId));
+                    
+                    // 1. Read the current election config
+                    const configSnap = await transaction.get(configRef);
+                    if (!configSnap.exists()) {
+                        throw new Error("Election config does not exist.");
+                    }
+                    const currentConfig = configSnap.data();
+
+                    // 2. Check if election is open
+                    if (!currentConfig.isOpen) {
+                        throw new Error("The election is closed.");
+                    }
+
+                    // 3. Read the user's voter status
+                    const voterSnap = await transaction.get(voterRef);
+                    if (voterSnap.exists() && voterSnap.data().hasVoted) {
+                        throw new Error("You have already voted.");
+                    }
+
+                    // 4. All checks passed. Proceed to write.
+                    
+                    // a) Increment vote counts in the config
+                    votes.forEach(vote => {
+                        // Ensure the path exists
+                        if (currentConfig.positions[vote.posIndex] &&
+                            currentConfig.positions[vote.posIndex].candidates[vote.candIndex]) {
+                            
+                            currentConfig.positions[vote.posIndex].candidates[vote.candIndex].votes += 1;
+                        } else {
+                            console.warn(`Invalid vote path: pos ${vote.posIndex}, cand ${vote.candIndex}`);
+                        }
+                    });
+                    
+                    transaction.set(configRef, currentConfig);
+                    
+                    // b) Mark this user as having voted
+                    transaction.set(voterRef, { 
+                        hasVoted: true,
+                        votedAt: Timestamp.now()
+                    });
+                });
+                
+                // If transaction was successful:
+                // The local state will be updated by the onSnapshot listener.
+                
+            } catch (error) {
+                showError(`Vote submission failed: ${error.message}`);
+                console.error("Vote transaction error: ", error);
+            } finally {
+                // Re-enable button (in case of error)
+                // If successful, the view will re-render and hide the button anyway.
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Submit My Vote';
+            }
+        }
+
+        // --- Results View Logic ---
+
+        /**
+         * Renders the results view.
+         */
+        function renderResultsView() {
+            const container = resultsContainer();
+            const message = resultsMessage();
+
+            if (!container || !message) return;
+
+            container.innerHTML = '';
+            
+            if (!electionConfig.positions || electionConfig.positions.length === 0) {
+                message.textContent = 'No election results to display yet.';
+                message.classList.remove('hidden');
+                return;
+            }
+            
+            message.classList.add('hidden');
+
+            electionConfig.positions.forEach(position => {
+                const posEl = document.createElement('div');
+                posEl.className = 'mb-8 p-6 bg-white border border-gray-200 rounded-lg shadow-md';
+                
+                let totalVotes = position.candidates.reduce((sum, cand) => sum + cand.votes, 0);
+                
+                let candidatesHTML = [...position.candidates]
+                    .sort((a, b) => b.votes - a.votes) // Sort by votes (descending)
+                    .map(candidate => {
+                        const percentage = totalVotes > 0 ? ((candidate.votes / totalVotes) * 100).toFixed(1) : 0;
+                        return `
+                            <div class="mb-4">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="text-lg font-medium text-gray-800">${candidate.name}</span>
+                                    <span class="text-lg font-semibold text-indigo-600">${candidate.votes} Vote(s)</span>
+                                </div>
+                                <div class="w-full bg-gray-200 rounded-full h-4">
+                                    <div 
+                                        class="bg-indigo-500 h-4 rounded-full transition-all duration-500 ease-out" 
+                                        style="width: ${percentage}%"
+                                    ></div>
+                                </div>
+                                <div class="text-right text-sm text-gray-500 mt-1">${percentage}%</div>
+                            </div>
+                        `;
+                    }).join('');
+
+                posEl.innerHTML = `
+                    <h3 class="text-2xl font-bold text-gray-900 mb-4 pb-2 border-b border-gray-200">${position.name}</h3>
+                    <div class->
+                        ${candidatesHTML}
+                    </div>
+                    <div class="text-right font-semibold text-gray-700 mt-4 pt-2 border-t border-gray-200">
+                        Total Votes Cast: ${totalVotes}
+                    </div>
+                `;
+                container.appendChild(posEl);
+            });
+        }
+
+
+        // --- Event Listener Registration ---
+
+        window.onload = () => {
+            // Set up main navigation
+            document.getElementById('tab-vote').onclick = () => switchView('vote');
+            document.getElementById('tab-results').onclick = () => switchView('results');
+            document.getElementById('tab-admin').onclick = () => switchView('admin');
+
+            // Admin listeners
+            addPositionButton().onclick = handleAddPosition;
+            electionStatusToggle().onchange = handleToggleElectionStatus;
+            saveConfigButton().onclick = handleSaveConfig;
+            resetElectionButton().onclick = handleResetElection;
+
+            // Vote listener
+            ballotForm().onsubmit = handleSubmitVote;
+
+            // Start the app
+            initializeFirebase();
+        };
+
+    </script>
+    <style>
+        /* Use Inter font */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom loading spinner */
+        .spinner {
+            border-top-color: #4f46e5; /* indigo-600 */
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+    <!-- Loading View -->
+    <div id="loading-view" class="flex items-center justify-center min-h-screen">
+        <div class="flex flex-col items-center">
+            <div class="spinner w-16 h-16 border-4 border-gray-200 rounded-full"></div>
+            <p class="text-gray-700 text-lg mt-4">Loading Election Platform...</p>
+            <p id="loading-error" class="text-red-600 mt-2"></p>
+        </div>
+    </div>
+
+    <!-- Main App View (Hidden until loaded) -->
+    <div id="app-view" class="hidden">
+        <header class="bg-indigo-600 shadow-md">
+            <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex items-center justify-between h-16">
+                    <div class="flex items-center">
+                        <span class="text-2xl font-bold text-white">Toastmasters Club Elections</span>
+                    </div>
+                    <div id="user-id-display" class="text-xs text-indigo-200 break-all"></div>
+                </div>
+            </nav>
+            <!-- View Tabs -->
+            <div id="view-tabs" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 hidden">
+                <div class="flex space-x-1">
+                    <button id="tab-vote" class="text-indigo-100 bg-indigo-500 hover:bg-indigo-600 px-3 py-2 rounded-t-md text-sm font-medium">Vote</button>
+                    <button id="tab-results" class="text-indigo-100 bg-indigo-500 hover:bg-indigo-600 px-3 py-2 rounded-t-md text-sm font-medium">Results</button>
+                    <button id="tab-admin" class="text-indigo-100 bg-indigo-500 hover:bg-indigo-600 px-3 py-2 rounded-t-md text-sm font-medium">Admin</button>
+                </div>
+            </div>
+        </header>
+
+        <main class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+            <!-- Error Display Area -->
+            <div id="error-display" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-6" role="alert">
+                <!-- Error message will be injected here -->
+            </div>
+            
+            <!-- Vote View -->
+            <div id="vote-view" class="hidden">
+                <h2 class="text-3xl font-bold text-gray-900 mb-6">Cast Your Ballot</h2>
+                <div id="vote-message" class="text-center p-4 rounded-md"></div>
+                <form id="ballot-form" class="space-y-6">
+                    <!-- Ballot will be rendered here -->
+                </form>
+                <button 
+                    id="submit-vote" 
+                    type="submit" 
+                    form="ballot-form"
+                    class="hidden mt-8 w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-lg font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-400"
+                >Submit My Vote</button>
+            </div>
+
+            <!-- Results View -->
+            <div id="results-view" class="hidden">
+                <h2 class="text-3xl font-bold text-gray-900 mb-6">Live Election Results</h2>
+                <div id="results-message" class="hidden text-center p-4 rounded-md bg-gray-100 text-gray-700"></div>
+                <div id="results-container" class="space-y-8">
+                    <!-- Results will be rendered here -->
+                </div>
+            </div>
+
+            <!-- Admin View -->
+            <div id="admin-view" class="hidden">
+                <h2 class="text-3xl font-bold text-gray-900 mb-6">Admin Panel</h2>
+                
+                <!-- Election Status -->
+                <div class="p-6 bg-white rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-semibold mb-4">Election Status</h3>
+                    <div class="flex items-center space-x-4">
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="election-status-toggle" class="sr-only peer">
+                            <div class="w-14 h-8 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content[''] after:absolute after:top-1 after:left-1 after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                        <span id="election-status-text" class="text-lg font-medium text-gray-700">Election is CLOSED</span>
+                    </div>
+                </div>
+
+                <!-- Election Configuration -->
+                <div class="p-6 bg-white rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-semibold mb-4">Election Configuration</h3>
+                    <div id="positions-container" class="space-y-4">
+                        <!-- Positions and candidates will be rendered here -->
+                    </div>
+                    <button 
+                        id="add-position" 
+                        type="button" 
+                        class="mt-6 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md shadow-sm font-medium"
+                    >+ Add Position</button>
+                    
+                    <div class="mt-8 border-t pt-6">
+                        <button 
+                            id="save-config" 
+                            type="button" 
+                            class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md shadow-sm font-medium disabled:bg-gray-400"
+                        >Save Configuration</button>
+                    </div>
+                </div>
+
+                <!-- Reset Election -->
+                <div class="p-6 bg-red-50 border-l-4 border-red-500 rounded-lg shadow-md mb-6">
+                    <h3 class="text-xl font-semibold text-red-800 mb-4">Danger Zone</h3>
+                    <p class="text-red-700 mb-4">This will reset all vote counts to zero and clear the "has voted" status for all members. This cannot be undone.</p>
+                    <button 
+                        id="reset-election" 
+                        type="button" 
+                        class="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md shadow-sm font-medium disabled:bg-gray-400"
+                    >Reset Entire Election</button>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+</body>
+</html>
